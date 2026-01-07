@@ -182,7 +182,9 @@ export default function TasksPage() {
     };
   };
 
-  const processedTasks = tasks.map(mapTask);
+  const processedTasks = tasks.map(mapTask).filter(task => 
+    !(isTaskDone(task) && !['partnership', 'social'].includes(task.type))
+  );
 
   const dailyTasks = processedTasks.filter(
     (task) => task.category === 'daily' || task.category === 'standard' || (!task.category && !['weekly', 'achievements'].includes(task.type))
