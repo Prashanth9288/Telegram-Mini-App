@@ -124,7 +124,6 @@
 //     }
 // });
 
-// console.log("\n✨ Done!");
 
 // pushTasks.js
 const { initializeApp } = require("firebase/app");
