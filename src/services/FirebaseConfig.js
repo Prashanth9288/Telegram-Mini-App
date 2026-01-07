@@ -57,7 +57,6 @@
 
 import { initializeApp } from 'firebase/app';
 import { getDatabase } from 'firebase/database';
-
 const firebaseConfig = {
   apiKey: "AIzaSyAr7pLAFvWzMtdaux2CooAOgLqtw9JOZIs",
     authDomain: "telegram-mini-applicatio-b17a1.firebaseapp.com",
