@@ -8,7 +8,7 @@ import { Progress } from "../../components/ui/progress.js";
 import { useTelegram } from "../../reactContext/TelegramContext";
 import { useNavigate } from "react-router-dom";
 import { database } from "../../services/FirebaseConfig";
-import { ref, onValue, update, get } from "firebase/database";
+import { ref, onValue, update, get, runTransaction } from "firebase/database";
 import { addHistoryLog } from "../../services/addHistory.js";
 
 const BOT_TOKEN = process.env.REACT_APP_BOT_TOKEN;
@@ -39,6 +39,7 @@ export default function TasksPage() {
   const [gameCompleted, setGameCompleted] = useState(false);
   const [newsCount, setnewsCount] = useState(0);
   const [localScores, setLocalScores] = useState(null);
+  const [weeklyProgressData, setWeeklyProgressData] = useState(null);
 
   const userTasksRef = ref(database, `connections/${user.id}`);
   const userScoreRef = ref(database, `users/${user.id}/Score`);
@@ -71,6 +72,18 @@ export default function TasksPage() {
     const { id, type } = task;
     const status = userTasks[id];
     if (status === undefined || status === null || status === false) return false;
+
+    // Video Task Logic: Check for Admin updates (Video URL Change)
+    if (type === 'watch') {
+      const currentVideoUrl = task.videoUrl || task.url;
+      // If we have a claimed status record
+      if (status && typeof status === 'object' && status.videoUrl) {
+         // If the video URL has changed since we claimed it, it's NOT done (User can watch again)
+         if (status.videoUrl !== currentVideoUrl) return false;
+      }
+      // Legacy handling or standard boolean status
+      return !!status;
+    }
 
     const RESET_TYPES = ['game', 'news', 'partnership'];
     if (RESET_TYPES.includes(type)) {
@@ -125,12 +138,23 @@ export default function TasksPage() {
       }
     });
 
+    const weeklyProgressRef = ref(database, `users/${user.id}/weekly_progress`);
+    const unsubscribeWeekly = onValue(weeklyProgressRef, (snapshot) => {
+        if (snapshot.exists()) {
+             // Map this to a local state if needed, or we just rely on it updating 'scores' if we put it there?
+             // Actually, we calculate 'weeklyPoints' later. Ideally we just store this data.
+             // Let's assume we might need a state for it.
+             setWeeklyProgressData(snapshot.val());
+        }
+    });
+
     return () => {
       unsubscribeTasks();
       unsubscribeGame();
       unsubscribeNews();
       unsubscribeUserTasks();
       unsubscribeScores();
+      unsubscribeWeekly();
     };
   }, [user.id]);
 
@@ -151,7 +175,10 @@ export default function TasksPage() {
   };
 
   // Use `points` as primary reward â€” fallback to `score`, then 100
-  const weeklyPoints = isSameWeek(scoreData?.weekly_updated_at) ? (scoreData?.weekly_points || 0) : 0;
+  // Use `points` as primary reward â€” fallback to `score`, then 100
+  // Updated Weekly Logic: Use 'current_week_days' from our new tracker
+  const weeklyDaysCompleted = weeklyProgressData?.current_week_days || 0;
+  const weeklyPoints = weeklyDaysCompleted; // Map directly to progress (1 = 1 day, 7 = 7 days)
 
   const mapTask = (task) => {
     // Check points, then score, then default to 100
@@ -168,8 +195,13 @@ export default function TasksPage() {
     // Map specific dynamic progress
     if (task.title && task.title.toLowerCase().includes('news')) {
       completedVal = newsCount;
-    } else if (task.id == 7 || (task.title && task.title.toLowerCase().includes('500 points'))) {
-      completedVal = weeklyPoints;
+    } else if (task.title && task.title.toLowerCase().includes('daily tasks')) {
+      // 7-day streak task
+      completedVal = weeklyDaysCompleted;
+    } else if (task.title && task.title.toLowerCase().includes('points')) {
+      // 500 points task - Ensure we use the weeklyPoints logic (which draws from scoreData.weekly_points)
+      // scoreData is 'localScores' which we update in the transaction now.
+      completedVal = isSameWeek(scoreData?.weekly_updated_at) ? (scoreData?.weekly_points || 0) : 0;
     }
 
     return {
@@ -264,60 +296,169 @@ export default function TasksPage() {
     }, 3000);
   };
 
+  /* 
+   * CRITICALLY OPTIMIZED handleTitle
+   * Uses Transactions for Atomic Score Updates
+   * Handles Weekly Progress Tracking
+   * Manages Video URL Versioning
+   */
   const handleTitle = async (task, taskId) => {
     const clickBtn = document.getElementById(`clickBtn${taskId}`);
     const currentText = buttonText[taskId] || "Start Task";
-    const updatedButtonTexts = { ...buttonText };
+    
+    // UI Feedback Helper
+    const setBtnLoading = () => setButtonText(prev => ({ ...prev, [taskId]: "Processing..." }));
+    const setBtnFailed = () => {
+       setButtonText(prev => ({ ...prev, [taskId]: "Failed" }));
+       setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
+    };
+
+    // --- SHARED CLAIM LOGIC START ---
+    const executeClaim = async (taskObj, extraData = {}) => {
+      setBtnLoading();
+      try {
+        const taskPoints = Number(taskObj.points) || 0;
+        
+        // 1. Transactional Score Update (Prevents Race Conditions)
+        const scoreTransactionResult = await runTransaction(userScoreRef, (currentScoreData) => {
+           if (!currentScoreData) {
+             return {
+               task_score: taskPoints,
+               total_score: taskPoints,
+               weekly_points: taskPoints,
+               weekly_updated_at: Date.now(),
+               task_updated_at: Date.now(),
+               farming_score: 0, game_score: 0, network_score: 0, news_score: 0
+             };
+           }
+           
+           // Calculate new totals safely
+           const new_task_score = (Number(currentScoreData.task_score) || 0) + taskPoints;
+           const new_total_score = (
+               (Number(currentScoreData.farming_score) || 0) +
+               (Number(currentScoreData.game_score) || 0) +
+               (Number(currentScoreData.network_score) || 0) +
+               (Number(currentScoreData.news_score) || 0) +
+               new_task_score
+           );
+
+           // Weekly Points Logic (with Reset)
+           let new_weekly_points = (Number(currentScoreData.weekly_points) || 0);
+           if (isSameWeek(currentScoreData.weekly_updated_at)) {
+               new_weekly_points += taskPoints;
+           } else {
+               new_weekly_points = taskPoints; // Reset for new week
+           }
+
+           return {
+             ...currentScoreData,
+             task_score: new_task_score,
+             total_score: new_total_score,
+             weekly_points: new_weekly_points,
+             weekly_updated_at: Date.now(), // Always update timestamp to keep it fresh
+             task_updated_at: Date.now()
+           };
+        });
+
+        if (scoreTransactionResult.committed) {
+             // 2. Update Task Status (Atomic per user action)
+             // Store specific data like videoUrl to handle Admin updates
+             const claimData = {
+               lastClaimed: Date.now(),
+               ...extraData
+             };
+             
+             await update(ref(database, `connections/${user.id}/${taskId}`), claimData);
+
+             // 3. Weekly Progress Logic
+             // Check if this was a Daily Task and if we finished the day
+             if (taskObj.category === 'daily' || taskObj.type === 'news' || taskObj.type === 'game' || taskObj.type === 'watch') {
+                 // Optimization: We verify client-side first to avoid spamming transactions
+                 // Filter *all* daily tasks from our local 'tasks' state
+                 const currentDailyTasks = tasks.filter(t => 
+                    (t.category === 'daily') || 
+                    (t.type === 'game') || 
+                    (t.type === 'news')
+                 );
+                 
+                 // Check if ALL are done (including the one we just claimed)
+                 // We pass the new status for *this* task explicitly to the checker helper logic or just rely on 'userTasks' locally updated?
+                 // React state 'userTasks' won't be updated yet. We need to be careful.
+                 const allDone = currentDailyTasks.every(t => {
+                    if (t.id === taskId) return true; // Optimistically assume this one is done
+                    return isTaskDone(t);
+                 });
+
+                 if (allDone) {
+                     // Check and increment weekly progress transactionally
+                     const weeklyRef = ref(database, `users/${user.id}/weekly_progress`);
+                     await runTransaction(weeklyRef, (currentWeekly) => {
+                         const now = new Date();
+                         // Simple date string for unique day check
+                         const todayStr = now.toISOString().split('T')[0];
+                         
+                         if (!currentWeekly) {
+                             return { current_week_days: 1, last_completed_date: todayStr };
+                         }
+
+                         // If already incremented for today, ignore
+                         if (currentWeekly.last_completed_date === todayStr) {
+                             return currentWeekly; // No change
+                         }
+
+                         // Check for Week Reset
+                         // If the last completion was NOT in the same week, reset count to 1
+                         // Note: We use 'last_completed_date' as the reference point
+                         let newDays;
+                         if (isSameWeek(currentWeekly.last_completed_date)) {
+                            newDays = (currentWeekly.current_week_days || 0) + 1;
+                         } else {
+                            newDays = 1; // New Week -> First day completed
+                         }
+                         
+                         return {
+                             ...currentWeekly,
+                             current_week_days: Math.min(newDays, 7),
+                             last_completed_date: todayStr
+                         };
+                     });
+                 }
+             }
+
+             // History Log
+             addHistoryLog(userId, {
+               action: `Task Reward: ${taskObj.title}`,
+               points: taskPoints,
+               type: taskObj.type || 'task',
+             });
+             
+             if(clickBtn) clickBtn.style.display = "none";
+        } else {
+             throw new Error("Transaction failed");
+        }
+      } catch (error) {
+         console.error("Claim Error:", error);
+         setBtnFailed();
+      }
+    };
+    // --- SHARED CLAIM LOGIC END ---
 
     switch (task.type?.toLowerCase()) {
       case "watch":
-        if (["Start Task", "Join Again"].includes(currentText) && userTasks[taskId] !== false) {
-          // Open Video Modal & Start Timer
-          const videoUrl = task.videoUrl || task.url;
-          if (videoUrl) {
-            setSelectedVideo(videoUrl);
-            setVideoTimer(30); // Require 30 seconds watch time
-            setActiveTaskId(taskId);
-          }
-        } else if (userTasks[taskId] === false || currentText === "Claim") {
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Calculate new task_score with strict Number parsing
-            const currentTaskScore = Number(currentData.task_score) || 0;
-            const taskPoints = Number(task.points) || 0;
-            const newTaskScore = currentTaskScore + taskPoints;
-
-            // Calculate new total_score
-            const newTotalScore = (
-              (Number(currentData.farming_score) || 0) +
-              (Number(currentData.game_score) || 0) +
-              (Number(currentData.network_score) || 0) +
-              (Number(currentData.news_score) || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            addHistoryLog(userId, {
-              action: 'Task Points Successfully Added',
-              points: taskPoints,
-              type: 'task',
-            });
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+        // For Watch tasks, we check if we need to show the video
+        // Status check: If not done OR text is "Start Task"/"Join Again"
+        // Also if we have a mismatch videoUrl, isTaskDone returns false, so we enter here.
+        if (["Start Task", "Join Again"].includes(currentText) && !isTaskDone(task)) {
+            // Open Video Modal
+            const videoUrl = task.videoUrl || task.url;
+            if (videoUrl) {
+              setSelectedVideo(videoUrl);
+              setVideoTimer(30); 
+              setActiveTaskId(taskId);
+            }
+        } else if (!isTaskDone(task) || currentText === "Claim") {
+             // Pass videoUrl to be stored in the claim record
+             executeClaim(task, { videoUrl: task.videoUrl || task.url });
         }
         break;
 
@@ -329,41 +470,8 @@ export default function TasksPage() {
           window.open(task.url, "_blank");
           const { chatId, chatType } = await handleChatId();
           startMembershipCheck(taskId, chatId, chatType);
-        } else if (currentText === "Claim" && userTasks[taskId] === false) {
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Calculate new task_score
-            const currentTaskScore = currentData.task_score || 0;
-            const newTaskScore = currentTaskScore + task.points;
-
-            // Calculate new total_score
-            const newTotalScore = (
-              (currentData.farming_score || 0) +
-              (currentData.game_score || 0) +
-              (currentData.network_score || 0) +
-              (currentData.news_score || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-
-            // Update both task_score and total_score
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+        } else if (currentText === "Claim" && !isTaskDone(task)) {
+             executeClaim(task);
         }
         break;
 
@@ -376,111 +484,58 @@ export default function TasksPage() {
         break;
 
       case "game":
-        if (userTasks[taskId] === false || currentText === "Claim") {
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Strict Number parsing to prevent string concatenation
-            const currentTaskScore = Number(currentData.task_score) || 0;
-            const taskPoints = Number(task.points) || 0;
-            const newTaskScore = currentTaskScore + taskPoints;
-
-            const newTotalScore = (
-              (Number(currentData.farming_score) || 0) +
-              (Number(currentData.game_score) || 0) +
-              (Number(currentData.network_score) || 0) +
-              (Number(currentData.news_score) || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            addHistoryLog(userId, {
-              action: 'Game Task Reward',
-              points: taskPoints,
-              type: 'game',
-            });
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+        if (!isTaskDone(task) || currentText === "Claim") {
+             executeClaim(task);
         } else if (["Start Task", "Play Again"].includes(currentText)) {
-          navigate("/game");
-          if (gameCompleted) {
-            update(userTasksRef, { [taskId]: false });
-            updatedButtonTexts[taskId] = "Claim";
-          } else {
-            updatedButtonTexts[taskId] = "Play Again";
-          }
-          setButtonText(updatedButtonTexts);
+           navigate("/game");
+           if (gameCompleted) {
+             update(userTasksRef, { [taskId]: false }); // Legacy reset? Prefer centralized reset logic if possible
+             const newTexts = { ...buttonText, [taskId]: "Claim" };
+             setButtonText(newTexts);
+           } else {
+             const newTexts = { ...buttonText, [taskId]: "Play Again" };
+             setButtonText(newTexts);
+           }
         }
         break;
 
       case "news":
-        if (userTasks[taskId] === false || currentText === "Claim") {
-          // Double check requirement
-          if (newsCount < 5) {
-            navigate("/news");
-            return;
-          }
-
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Calculate new task_score with strict Number parsing
-            const currentTaskScore = Number(currentData.task_score) || 0;
-            const taskPoints = Number(task.points) || 0;
-            const newTaskScore = currentTaskScore + taskPoints;
-
-            // Calculate new total_score
-            const newTotalScore = (
-              (Number(currentData.farming_score) || 0) +
-              (Number(currentData.game_score) || 0) +
-              (Number(currentData.network_score) || 0) +
-              (Number(currentData.news_score) || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            addHistoryLog(userId, {
-              action: 'News Task Reward',
-              points: taskPoints,
-              type: 'news',
-            });
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+        if (!isTaskDone(task) || currentText === "Claim") {
+           if (newsCount < 5) {
+             navigate("/news");
+             return;
+           }
+           executeClaim(task);
         } else {
-          // Default action: Navigate to news
-          navigate("/news");
-          // Check if news requirement is met to update status immediately (optional UX improvement)
-          if (newsCount >= 5) {
-            update(userTasksRef, { [taskId]: false }); // Mark as claimable
-            updatedButtonTexts[taskId] = "Claim";
-            setButtonText(updatedButtonTexts);
-          }
+           navigate("/news");
+           if (newsCount >= 5) {
+              // Local UI update to enable claim if we just returned
+              update(userTasksRef, { [taskId]: false }); 
+              setButtonText(prev => ({ ...prev, [taskId]: "Claim" }));
+           }
+        }
+        break;
+        
+      case "weekly":
+        // Logic for Weekly Claim
+        if (!isTaskDone(task)) {
+           // Verify completion requirement using the mapped 'completed' value
+           // task.completed is set in mapTask
+           if (task.completed >= task.total) {
+               executeClaim(task);
+           } else {
+               // Optional: Visual feedback that it's not ready
+               const updatedButtonTexts = { ...buttonText };
+               updatedButtonTexts[taskId] = "In Progress";
+               setButtonText(updatedButtonTexts);
+               setTimeout(() => {
+                   setButtonText(prev => {
+                       const next = { ...prev };
+                       delete next[taskId]; // Reset to default
+                       return next;
+                   });
+               }, 1000);
+           }
         }
         break;
 
@@ -623,7 +678,12 @@ export default function TasksPage() {
                             >
                               {isTaskDone(task)
                                 ? (task.type === 'partnership' || task.type === 'social' ? "Open" : "Done")
-                                : (userTasks[task.id] === false && (task.type !== 'news' || newsCount >= 5) ? "Claim" : buttonText[task.id] || "Start Task")
+                                : (
+                                    (userTasks[task.id] === false && (task.type !== 'news' || newsCount >= 5)) || 
+                                    (task.type === 'weekly' && task.completed >= task.total) 
+                                    ? "Claim" 
+                                    : buttonText[task.id] || "Start Task"
+                                  )
                               }
                             </button>
                           </div>
@@ -730,7 +790,12 @@ export default function TasksPage() {
                               >
                                 {isTaskDone(task)
                                   ? (task.type === 'partnership' || task.type === 'social' ? "Open" : "Done")
-                                  : (userTasks[taskId] === false ? "Claim" : buttonText[taskId] || "Start Task")
+                                  : (
+                                      (userTasks[taskId] === false) ||
+                                      (task.type === 'weekly' && task.completed >= task.total)
+                                      ? "Claim" 
+                                      : buttonText[taskId] || "Start Task"
+                                    )
                                 }
                               </button>
                             </div>

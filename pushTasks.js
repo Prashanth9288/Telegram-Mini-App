@@ -184,7 +184,7 @@ const allTasks = [
     description: "Educational quiz to test your knowledge",
     completed: 0,
     type: "misc",
-    category: "educational",
+    category: "daily",
     total: 1,
     points: 75,
     score: 75,
