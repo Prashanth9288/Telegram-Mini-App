@@ -203,7 +203,8 @@ const allTasks = [
     score: 300,
     iconBg: "bg-indigo-500/30",
     updatedAt: "2026-01-02T00:00:00.000Z",
-    url: "https://www.youtube.com/watch?v=E2JQrC6yO1U",
+    url: "https://www.youtube.com/watch?v=MIaEoMOJADE",
+    videoUrl: "https://www.youtube.com/watch?v=MIaEoMOJADE",
   },
   {
     id: 5,
