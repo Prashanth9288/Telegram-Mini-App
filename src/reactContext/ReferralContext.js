@@ -104,7 +104,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useTelegram } from './TelegramContext.js';
 import { database } from '../services/FirebaseConfig.js';
-import { ref, get, update, set, onValue, runTransaction } from 'firebase/database';
+import { ref, get, update, set, onValue } from 'firebase/database';
 
 const ReferralContext = createContext();
 export const useReferral = () => useContext(ReferralContext);
@@ -260,62 +260,41 @@ export const ReferralProvider = ({ children }) => {
 
   // DB updates
   const updateScores = async (refId, amount) => {
-    const scoreRef = ref(database, `users/${refId}/Score`);
-    await runTransaction(scoreRef, (currentData) => {
-      if (!currentData) {
-        return { 
-          network_score: amount, 
-          total_score: amount,
-          task_updated_at: Date.now()
-        };
-      }
-      return {
-        ...currentData,
-        network_score: (currentData.network_score || 0) + amount,
-        total_score: (currentData.total_score || 0) + amount,
-        task_updated_at: Date.now()
-      };
-    });
+    // Update network_score
+    const scoreRef = ref(database, `users/${refId}/Score/network_score`);
+    const snap = await get(scoreRef);
+    const curr = snap.exists() ? snap.val() : 0;
+    await set(scoreRef, curr + amount);
+
+    // Update total_score
+    const totalRef = ref(database, `users/${refId}/Score/total_score`);
+    const totalSnap = await get(totalRef);
+    const tot = totalSnap.exists() ? totalSnap.val() : 0;
+    await set(totalRef, tot + amount);
   };
 
   const addReferralRecord = async (referrerId, referredId) => {
     const referrerUserRef = ref(database, `users/${referrerId}`);
-    
-    // Check if referrer exists (optional, mostly for safety)
     const userSnap = await get(referrerUserRef);
+
     if (!userSnap.exists()) {
-       // Create minimal user struct if missing
-       await set(referrerUserRef, { referrals: {} });
+      // Optionally create the user if this is a bug
+      await set(referrerUserRef, {
+        referrals: {}
+      });
     }
+    // Add to referrer list and award
+    const refRef = ref(database, `users/${referrerId}/referrals`);
+    const snap = await get(refRef);
+    const list = snap.val() || {};
+    const exists = Object.values(list).includes(referredId);
+    if (exists) return;
+    const idx = Object.keys(list).length + 1;
+    await update(refRef, { [idx]: referredId });
 
-    // Atomic update for Referral List
-    const referralsRef = ref(database, `users/${referrerId}/referrals`);
-    let referralSuccess = false;
-
-    await runTransaction(referralsRef, (currentReferrals) => {
-      const list = currentReferrals || {};
-      const exists = Object.values(list).includes(referredId);
-      
-      if (exists) {
-        return; // Abort transaction if already referred
-      }
-
-      // Add new referral
-      const nextIndex = Object.keys(list).length + 1;
-      // Using numbered index as per original logic
-      list[nextIndex] = referredId;
-      referralSuccess = true;
-      return list;
-    });
-
-    if (referralSuccess) {
-      // Award: referrer 100, referred 50
-      await updateScores(referrerId, 100);
-      await updateScores(referredId, 50);
-      console.log(`Referral successful: ${referrerId} -> ${referredId}`);
-    } else {
-        console.log(`Referral skipped (already exists): ${referrerId} -> ${referredId}`);
-    }
+    // Award: referrer 100, referred 50
+    await updateScores(referrerId, 100);
+    await updateScores(referredId, 50);
   };
 
   const shareToTelegram = () => window.open(`https://t.me/share/url?url=${encodeURIComponent(inviteLink)}&text=${encodeURIComponent('Join me and earn rewards!')}`, '_blank');
