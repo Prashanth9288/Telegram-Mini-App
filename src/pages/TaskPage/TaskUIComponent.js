@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+﻿import { useState, useEffect, useMemo, useRef } from "react";
 import { ChevronLeft, Award, Zap, Users, Wallet, CheckSquare, BookOpen, PlayCircle, Send, Twitter, X } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
@@ -8,7 +8,7 @@ import { Progress } from "../../components/ui/progress.js";
 import { useTelegram } from "../../reactContext/TelegramContext";
 import { useNavigate } from "react-router-dom";
 import { database } from "../../services/FirebaseConfig";
-import { ref, onValue, update, get } from "firebase/database";
+import { ref, onValue, update, runTransaction } from "firebase/database";
 import { addHistoryLog } from "../../services/addHistory.js";
 
 const BOT_TOKEN = process.env.REACT_APP_BOT_TOKEN;
@@ -24,6 +24,7 @@ export default function TasksPage() {
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoTimer, setVideoTimer] = useState(0);
   const [activeTaskId, setActiveTaskId] = useState(null);
+  const [processingTasks, setProcessingTasks] = useState(new Set()); // New state to lock UI
 
   useEffect(() => {
     let interval;
@@ -40,9 +41,9 @@ export default function TasksPage() {
   const [newsCount, setnewsCount] = useState(0);
   const [localScores, setLocalScores] = useState(null);
 
-  const userTasksRef = ref(database, `connections/${user.id}`);
-  const userScoreRef = ref(database, `users/${user.id}/Score`);
-  const userId = user.id;
+  const userTasksRef = ref(database, `connections/${user?.id}`);
+  const userScoreRef = ref(database, `users/${user?.id}/Score`);
+  const userId = user?.id;
 
   const isToday = (timestamp) => {
     if (!timestamp) return false;
@@ -68,26 +69,53 @@ export default function TasksPage() {
   };
 
   const isTaskDone = (task) => {
-    const { id, type } = task;
-    const status = userTasks[id];
-    if (status === undefined || status === null || status === false) return false;
+    const { id, type, reset_config, version } = task;
+    const userStatus = userTasks?.[id];
 
-    const RESET_TYPES = ['game', 'news', 'partnership'];
-    if (RESET_TYPES.includes(type)) {
-      // Legacy 'true' means old data -> Expired/Reset
-      if (status === true) return false;
+    // 1. Not started / Not claimed
+    if (userStatus === undefined || userStatus === null || userStatus === false) return false;
 
-      if (typeof status === 'object' && status.lastClaimed) {
-        return isToday(status.lastClaimed);
-      }
-      return false;
+    // 2. Version Check (New Feature)
+    // If task has a version, and user's claim is older (or legacy 'true'), they must re-do it.
+    const taskVersion = version || 0;
+    const claimedVersion = (typeof userStatus === 'object') ? (userStatus.version || 0) : 0; // Legacy 'true' = version 0
+    
+    if (taskVersion > claimedVersion) return false;
+
+    // 3. Config-Driven Reset Logic (The "Rule Book")
+    if (reset_config) {
+      if (userStatus === true) return false; // Legacy claims on scoped tasks are considered expired to be safe
+      
+      const lastClaimed = userStatus.lastClaimed;
+      if (!lastClaimed) return false;
+
+      if (reset_config.period === 'daily') return isToday(lastClaimed);
+      if (reset_config.period === 'weekly') return isSameWeek(lastClaimed);
+      // 'once' or 'infinite' falls through to true
+    } 
+    
+    // 4. Legacy Hardcoded Fallbacks (Backward Compatibility)
+    // If no reset_config is defined in DB, use old type-based rules
+    const LEGACY_RESET_TYPES = ['game', 'news', 'partnership'];
+    if (!reset_config && LEGACY_RESET_TYPES.includes(type)) {
+       if (userStatus === true) return false; // Legacy boolean 'true' means expired for daily tasks in old system logic? 
+       // Actually in old logic: "if (status === true) return false;" for RESET_TYPES. 
+       // This implies 'true' was a temporary state or effectively "ready to claim"? 
+       // Wait, looking at lines 78-79 of original: "if (status === true) return false;" for RESET_TYPES.
+       // Yes, so we keep that behavior.
+       
+       if (typeof userStatus === 'object' && userStatus.lastClaimed) {
+         return isToday(userStatus.lastClaimed);
+       }
+       return false;
     }
 
-    // Default: Permanent completion for other tasks
+    // Default: It is claimed forever
     return true;
   };
 
   useEffect(() => {
+    if (!user?.id) return;
     const tasksRef = ref(database, "tasks");
     const gameTaskRef = ref(database, `connections/${user.id}/tasks/daily/game`);
     const newsRef = ref(database, `connections/${user.id}/tasks/daily/news`);
@@ -108,7 +136,19 @@ export default function TasksPage() {
     });
 
     const unsubscribeGame = onValue(gameTaskRef, (snapshot) => {
-      setGameCompleted(snapshot.val() === true);
+      const data = snapshot.val();
+      if (typeof data === 'boolean') {
+         // Legacy support: if true from old system, treat as done (or maybe require replay? let's require replay for strict daily)
+         // Actually, to be safe, if boolean true, assume done for today? 
+         // But we want to fix the "permanent true" bug.
+         // So: Boolean True -> Treat as FALSE (Force Replay) to fix the bug?
+         // Or: Boolean True -> Treat as TRUE (User happy) but it never resets.
+         // Given the goal "Admin-driven daily reset", we MUST require a timestamp.
+         // So: Boolean -> False. (User must play once to get the timestamp).
+         setGameCompleted(false);
+      } else {
+         setGameCompleted(isToday(data?.lastPlayed));
+      }
     });
 
     const unsubscribeNews = onValue(newsRef, (snapshot) => {
@@ -132,11 +172,20 @@ export default function TasksPage() {
       unsubscribeUserTasks();
       unsubscribeScores();
     };
-  }, [user.id]);
+  }, [user?.id]);
 
   // Use localScores for real-time updates, fallback to context
   const scoreData = localScores || scores;
   const displayTaskScore = isToday(scoreData?.task_updated_at) ? (scoreData?.task_score || 0) : 0;
+  
+  const checkIntervalRef = useRef(null);
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (checkIntervalRef.current) clearInterval(checkIntervalRef.current);
+    };
+  }, []);
 
   const IconMap = {
     Zap: <Zap className="h-5 w-5 text-indigo-300" />,
@@ -182,15 +231,18 @@ export default function TasksPage() {
     };
   };
 
-  const processedTasks = tasks.map(mapTask).filter(task => 
-    !(isTaskDone(task) && !['partnership', 'social'].includes(task.type))
-  );
+  const processedTasks = useMemo(() => {
+    return tasks.map(mapTask).filter(task => 
+      !(isTaskDone(task) && !['partnership', 'social'].includes(task.type))
+    );
+  }, [tasks, userTasks, newsCount, weeklyPoints]); // Dependencies for mapTask and filter
 
-  const dailyTasks = processedTasks.filter(
+  const dailyTasks = useMemo(() => processedTasks.filter(
     (task) => task.category === 'daily' || task.category === 'standard' || (!task.category && !['weekly', 'achievements'].includes(task.type))
-  );
-  const weeklyTasks = processedTasks.filter(task => task.category === 'weekly');
-  const achievements = processedTasks.filter(task => task.category === 'achievements');
+  ), [processedTasks]);
+
+  const weeklyTasks = useMemo(() => processedTasks.filter(task => task.category === 'weekly'), [processedTasks]);
+  const achievements = useMemo(() => processedTasks.filter(task => task.category === 'achievements'), [processedTasks]);
 
   const fetchChatMember = async (chatId, userId) => {
     try {
@@ -225,18 +277,21 @@ export default function TasksPage() {
 
   const startMembershipCheck = async (taskId, chatId, chatType) => {
     let checkCount = 0;
-    const interval = setInterval(async () => {
+    // Clear any existing interval
+    if (checkIntervalRef.current) clearInterval(checkIntervalRef.current);
+
+    checkIntervalRef.current = setInterval(async () => {
       checkCount += 1;
       if (!chatId || !chatType) {
         setButtonText(prev => ({ ...prev, [taskId]: "Failed" }));
-        clearInterval(interval);
+        clearInterval(checkIntervalRef.current);
         return;
       }
 
       const chatMember = await fetchChatMember(chatId, user.id);
       if (!chatMember || !chatMember.status) {
         setButtonText(prev => ({ ...prev, [taskId]: "Failed" }));
-        clearInterval(interval);
+        clearInterval(checkIntervalRef.current);
         return;
       }
 
@@ -251,17 +306,99 @@ export default function TasksPage() {
       if (isMember) {
         await update(userTasksRef, { [taskId]: false });
         setButtonText(prev => ({ ...prev, [taskId]: "Claim" }));
-        clearInterval(interval);
+        clearInterval(checkIntervalRef.current);
       } else {
         setButtonText(prev => ({ ...prev, [taskId]: "Join Again" }));
-        clearInterval(interval);
+        clearInterval(checkIntervalRef.current);
+        // Wait, original logic CLEARED interval on failure ("Join Again").
+        // This stops checking. If user joins, they must click again.
+        // This is fine.
       }
 
       if (checkCount >= 100) {
         setButtonText(prev => ({ ...prev, [taskId]: "Failed" }));
-        clearInterval(interval);
+        clearInterval(checkIntervalRef.current);
       }
     }, 3000);
+  };
+
+  const handleSafeClaim = async (task, taskId) => {
+    if (processingTasks.has(taskId)) return; // Prevent double clicks
+    
+    // UI update to show processing
+    const updatedButtonTexts = { ...buttonText };
+    updatedButtonTexts[taskId] = "Processing...";
+    setButtonText(updatedButtonTexts);
+    setProcessingTasks(prev => new Set(prev).add(taskId));
+
+    try {
+      const taskPoints = Number(task.points) || 0;
+
+      // ATOMIC TRANSACTION: Update scores safely
+      await runTransaction(userScoreRef, (currentData) => {
+        if (!currentData) {
+          // Initialize if missing (edge case)
+          return {
+            farming_score: 0,
+            game_score: 0,
+            network_score: 0,
+            news_score: 0,
+            task_score: taskPoints,
+            total_score: taskPoints,
+            task_updated_at: Date.now()
+          };
+        }
+
+        const currentTaskScore = Number(currentData.task_score) || 0;
+        const newTaskScore = currentTaskScore + taskPoints;
+
+        // Recalculate total score based on existing values + new task score
+        const newTotalScore = (
+          (Number(currentData.farming_score) || 0) +
+          (Number(currentData.game_score) || 0) +
+          (Number(currentData.network_score) || 0) +
+          (Number(currentData.news_score) || 0) +
+          newTaskScore
+        );
+
+        return {
+          ...currentData,
+          task_score: newTaskScore,
+          total_score: newTotalScore,
+          task_updated_at: Date.now()
+        };
+      });
+
+      // Mark task as claimed with Versioning Support
+      const claimData = { 
+        lastClaimed: Date.now(), 
+        status: 'claimed',
+        version: task.version || 0 // Save version at time of claim
+      };
+      await update(userTasksRef, { [taskId]: claimData });
+
+      addHistoryLog(userId, {
+        action: 'Task Claimed',
+        points: taskPoints,
+        type: task.type || 'task',
+      });
+
+      // Hide button / Success UI
+      const clickBtn = document.getElementById(`clickBtn${taskId}`);
+      if (clickBtn) clickBtn.style.display = "none";
+      
+    } catch (error) {
+      console.error("Claim Error:", error);
+      updatedButtonTexts[taskId] = "Failed";
+      setButtonText(updatedButtonTexts);
+      setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
+    } finally {
+      setProcessingTasks(prev => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
   };
 
   const handleTitle = async (task, taskId) => {
@@ -280,44 +417,7 @@ export default function TasksPage() {
             setActiveTaskId(taskId);
           }
         } else if (userTasks[taskId] === false || currentText === "Claim") {
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Calculate new task_score with strict Number parsing
-            const currentTaskScore = Number(currentData.task_score) || 0;
-            const taskPoints = Number(task.points) || 0;
-            const newTaskScore = currentTaskScore + taskPoints;
-
-            // Calculate new total_score
-            const newTotalScore = (
-              (Number(currentData.farming_score) || 0) +
-              (Number(currentData.game_score) || 0) +
-              (Number(currentData.network_score) || 0) +
-              (Number(currentData.news_score) || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            addHistoryLog(userId, {
-              action: 'Task Points Successfully Added',
-              points: taskPoints,
-              type: 'task',
-            });
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+           await handleSafeClaim(task, taskId);
         }
         break;
 
@@ -330,40 +430,7 @@ export default function TasksPage() {
           const { chatId, chatType } = await handleChatId();
           startMembershipCheck(taskId, chatId, chatType);
         } else if (currentText === "Claim" && userTasks[taskId] === false) {
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Calculate new task_score
-            const currentTaskScore = currentData.task_score || 0;
-            const newTaskScore = currentTaskScore + task.points;
-
-            // Calculate new total_score
-            const newTotalScore = (
-              (currentData.farming_score || 0) +
-              (currentData.game_score || 0) +
-              (currentData.network_score || 0) +
-              (currentData.news_score || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-
-            // Update both task_score and total_score
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+          await handleSafeClaim(task, taskId);
         }
         break;
 
@@ -377,43 +444,7 @@ export default function TasksPage() {
 
       case "game":
         if (userTasks[taskId] === false || currentText === "Claim") {
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Strict Number parsing to prevent string concatenation
-            const currentTaskScore = Number(currentData.task_score) || 0;
-            const taskPoints = Number(task.points) || 0;
-            const newTaskScore = currentTaskScore + taskPoints;
-
-            const newTotalScore = (
-              (Number(currentData.farming_score) || 0) +
-              (Number(currentData.game_score) || 0) +
-              (Number(currentData.network_score) || 0) +
-              (Number(currentData.news_score) || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            addHistoryLog(userId, {
-              action: 'Game Task Reward',
-              points: taskPoints,
-              type: 'game',
-            });
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+           await handleSafeClaim(task, taskId);
         } else if (["Start Task", "Play Again"].includes(currentText)) {
           navigate("/game");
           if (gameCompleted) {
@@ -433,45 +464,7 @@ export default function TasksPage() {
             navigate("/news");
             return;
           }
-
-          updatedButtonTexts[taskId] = "Processing...";
-          setButtonText(updatedButtonTexts);
-          try {
-            const snapshot = await get(userScoreRef);
-            const currentData = snapshot.val() || {};
-
-            // Calculate new task_score with strict Number parsing
-            const currentTaskScore = Number(currentData.task_score) || 0;
-            const taskPoints = Number(task.points) || 0;
-            const newTaskScore = currentTaskScore + taskPoints;
-
-            // Calculate new total_score
-            const newTotalScore = (
-              (Number(currentData.farming_score) || 0) +
-              (Number(currentData.game_score) || 0) +
-              (Number(currentData.network_score) || 0) +
-              (Number(currentData.news_score) || 0) +
-              newTaskScore
-            );
-
-            await update(userTasksRef, { [taskId]: { lastClaimed: Date.now() } });
-            await update(userScoreRef, {
-              task_score: newTaskScore,
-              total_score: newTotalScore,
-              task_updated_at: Date.now()
-            });
-
-            addHistoryLog(userId, {
-              action: 'News Task Reward',
-              points: taskPoints,
-              type: 'news',
-            });
-            clickBtn.style.display = "none";
-          } catch (error) {
-            updatedButtonTexts[taskId] = "Failed";
-            setButtonText(updatedButtonTexts);
-            setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
-          }
+           await handleSafeClaim(task, taskId);
         } else {
           // Default action: Navigate to news
           navigate("/news");
@@ -788,6 +781,10 @@ export default function TasksPage() {
                   if (activeTaskId) {
                     await update(userTasksRef, { [activeTaskId]: false });
                     setButtonText(prev => ({ ...prev, [activeTaskId]: "Claim" }));
+                    // Auto-claim if desired, but user flow suggests they click "Claim" on the card.
+                    // However, if we want to support auto-claim here or just enable the button:
+                    // The 'handleSafeClaim' is called when they click "Claim" on the main card.
+                    // Here we just mark it as ready-to-claim (false).
                   }
                   setSelectedVideo(null);
                 }}

@@ -162,6 +162,8 @@ const allTasks = [
     updatedAt: "2026-01-02T00:00:00.000Z",
     url: "https://www.youtube.com/watch?v=E2JQrC6yO1U",
     videoUrl: "https://www.youtube.com/watch?v=E2JQrC6yO1U",
+    version: 1,
+    reset_config: { period: "once" }
   },
 
   {
@@ -201,6 +203,8 @@ const allTasks = [
     total: 1,
     points: 300,
     score: 300,
+    version: 1,
+    reset_config: { period: "daily" },
     iconBg: "bg-indigo-500/30",
     updatedAt: "2026-01-02T00:00:00.000Z",
     url: "https://www.youtube.com/watch?v=E2JQrC6yO1U",

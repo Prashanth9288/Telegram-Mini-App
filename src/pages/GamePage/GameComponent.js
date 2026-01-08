@@ -58,7 +58,7 @@ import InstructionsPopup from "./InstructionsPopup";
 import GameOverPopup from "./GameOverPopup";
 import { useTelegram } from "../../reactContext/TelegramContext.js";
 import { database } from "../../services/FirebaseConfig.js";
-import { ref, get, update } from "firebase/database";
+import { ref, get, update, runTransaction } from "firebase/database";
 
 import "../../Styles/gameComponent.css";
 
@@ -75,25 +75,22 @@ function GameComponent() {
   const decreaseTicketCount = async (userId) => {
     if (!userId) return;
   
-    const ticketRef = ref(database, `users/${userId}/Score/no_of_tickets`);
+    const scoreRef = ref(database, `users/${userId}/Score`);
   
     try {
-      const snapshot = await get(ticketRef);
-      
-      if (snapshot.exists()) {
-        let currentTickets = snapshot.val();
-        
+      await runTransaction(scoreRef, (currentData) => {
+        if (!currentData) return; // Should return undefined to abort or null/object to update? usually safely return undefined if no data
+        // If data exists:
+        const currentTickets = Number(currentData.no_of_tickets) || 0;
         if (currentTickets > 0) {
-          await update(ref(database, `users/${userId}/Score`), {
-            no_of_tickets: currentTickets - 1,
-          });
-          console.log("Ticket count decreased successfully.");
-        } else {
-          console.log("No more tickets left.");
+          return {
+            ...currentData,
+            no_of_tickets: currentTickets - 1
+          };
         }
-      } else {
-        console.log("No tickets found.");
-      }
+        return; // Abort if 0 tickets
+      });
+      console.log("Ticket count decreased safely.");
     } catch (error) {
       console.error("Error updating ticket count:", error);
     }
@@ -113,20 +110,20 @@ function GameComponent() {
     setFinalScore(score);
     setHighScore(high);
     setGameOver(true);
+
+    // Mark game as played for today (Unlock Condition)
+    const taskRef = ref(database, `connections/${user.id}/tasks/daily`);
+    try {
+      update(taskRef, { game: { lastPlayed: Date.now() } });
+    } catch (error) {
+       console.error("Error updating game task timestamp:", error);
+    }
   };
 
   const handleRestart = () => {
     setGameKey((prev) => prev + 1); 
     setGameStarted(false);
     setGameOver(false);
-    const taskRef = ref(database, `connections/${user.id}/tasks/daily`);
-
-    try {
-       update(taskRef, { game: true }); // or set to false depending on logic
-      console.log("Game task updated in Firebase ✅");
-    } catch (error) {
-      console.error("Error updating game task in Firebase:", error);
-    }
   };
 
   // When the Back button is clicked, we set gameStarted to false.

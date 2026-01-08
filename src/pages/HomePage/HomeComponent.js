@@ -1034,9 +1034,7 @@ export default function HomeComponent() {
   const { showWelcomePopup, setShowWelcomePopup } = useReferral();
 
   const [currentNewsIndex, setCurrentNewsIndex] = useState(0);
-  const [isFarming, setIsFarming] = useState(false);
   const [points, setPoints] = useState(120);
-  const [farmingProgress, setFarmingProgress] = useState(0);
   // const { farmingState } = useFarming();
   const { currentStreak, loadingStreak } = useStreak();
 
@@ -1129,23 +1127,6 @@ export default function HomeComponent() {
     },
   ]
 
-  // Simulate farming progress
-  useEffect(() => {
-    if (isFarming) {
-      const interval = setInterval(() => {
-        setFarmingProgress((prev) => {
-          if (prev >= 100) {
-            clearInterval(interval);
-            return 100;
-          }
-          return prev + 0.4;
-        });
-      }, 100);
-
-      return () => clearInterval(interval);
-    }
-  }, [isFarming]);
-
   // Handle swipe on news card
   const handleSwipe = (direction) => {
     // Add points for engagement if swiped "Interesting"
@@ -1154,19 +1135,6 @@ export default function HomeComponent() {
     }
     // Move to next news item
     setCurrentNewsIndex((prev) => (prev + 1) % newsItems.length);
-  };
-
-  // Handle farming button click
-  const handleFarmingClick = () => {
-    if (farmingProgress === 100) {
-      // Claim points
-      setPoints((prev) => prev + 50);
-      setFarmingProgress(0);
-      setIsFarming(false);
-    } else {
-      // Start farming
-      setIsFarming(true);
-    }
   };
 
   const isToday = (timestamp) => {
@@ -1364,19 +1332,6 @@ export default function HomeComponent() {
                   </div>
                   <FarmingButton />
                 </div>
-                {isFarming && (
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-xs text-white/90">
-                      <span>Farming Progress</span>
-                      <span>{Math.floor(farmingProgress)}%</span>
-                    </div>
-                    <Progress
-                      value={farmingProgress}
-                      className="h-1.5 bg-white/20"
-                      indicatorClassName="bg-amber-400"
-                    />
-                  </div>
-                )}
               </CardContent>
             </Card>
 
