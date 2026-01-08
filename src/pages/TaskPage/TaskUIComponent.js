@@ -465,8 +465,7 @@ export default function TasksPage() {
       case "social":
         setClick(prev => ({ ...prev, [task.title]: true }));
         if (["Start Task", "Join Again", "Failed"].includes(currentText)) {
-          updatedButtonTexts[taskId] = "Checking...";
-          setButtonText(updatedButtonTexts);
+          setButtonText(prev => ({ ...prev, [taskId]: "Checking..." }));
           window.open(task.url, "_blank");
           const { chatId, chatType } = await handleChatId();
           startMembershipCheck(taskId, chatId, chatType);
