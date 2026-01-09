@@ -109,11 +109,14 @@ export default function TasksPage() {
       // Logic from lines 52-62
       if (snapshot.exists()) {
         const data = snapshot.val();
-        console.log("Fetched Tasks from Firebase:", data);
-        const tasksArray = Object.entries(data).map(([key, task]) => ({
-          ...task,
-          id: task.id || key,
-        }));
+        const tasksArray = Object.entries(data).flatMap(([category, categoryTasks]) => {
+            if (!categoryTasks || typeof categoryTasks !== 'object') return [];
+            return Object.entries(categoryTasks).map(([key, task]) => ({
+                ...task,
+                id: task.id || key, // Ensure ID exists
+                category: task.category || category // Fallback to folder name if category property is missing
+            }));
+        });
         setTasks(tasksArray);
       } else {
         setTasks([]);
