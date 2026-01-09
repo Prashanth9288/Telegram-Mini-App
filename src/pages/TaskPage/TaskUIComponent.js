@@ -488,7 +488,8 @@ export default function TasksPage() {
         break;
 
       case "game":
-        if (currentText === "Claim") {
+        // Check if game is completed or explicitly ready to claim
+        if (gameCompleted || (userTasks[taskId] === false) || currentText === "Claim") {
              executeClaim(task);
         } else {
            navigate("/game");
