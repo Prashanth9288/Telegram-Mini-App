@@ -218,11 +218,13 @@ export default function TasksPage() {
   };
 
   const processedTasks = tasks.map(mapTask).filter(task => 
-    !(isTaskDone(task) && !['partnership', 'social'].includes(task.type))
+    !(isTaskDone(task) && !['partnership', 'social', 'watch'].includes(task.type))
   );
 
   const dailyTasks = processedTasks.filter(
-    (task) => (task.category === 'daily' || task.category === 'standard' || (!task.category && !['weekly', 'achievements'].includes(task.type))) && task.type !== 'social'
+    (task) => (task.category === 'daily' || task.category === 'standard' || (!task.category && !['weekly', 'achievements'].includes(task.type))) 
+              && task.type !== 'social'
+              && !(task.type === 'watch' && isTaskDone(task)) // Hide completed watch tasks from daily
   );
   const weeklyTasks = processedTasks.filter(task => task.category === 'weekly');
   const achievements = processedTasks.filter(task => task.category === 'achievements');
