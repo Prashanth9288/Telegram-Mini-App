@@ -664,9 +664,6 @@ export default function TasksPage() {
                             <div className="flex flex-col">
                               <p className="text-xs text-white/70 mt-1">
                                 {task.description}
-                                {isTaskDone(task) && (
-                                  <span className="text-white bg-green-500 p-1 ml-1 rounded text-[10px]">Verified ✅</span>
-                                )}
                               </p>
                             </div>
                           </div>
@@ -775,9 +772,6 @@ export default function TasksPage() {
                               <div className="flex flex-col">
                                 <p className="text-xs text-white/70 mt-1">
                                   {task.description}
-                                  {isTaskDone(task) && (
-                                    <span className="text-white bg-green-500 p-1 ml-1 rounded text-[10px]">Verified ✅</span>
-                                  )}
                                 </p>
 
                               </div>
