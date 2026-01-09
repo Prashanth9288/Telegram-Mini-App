@@ -483,18 +483,10 @@ export default function TasksPage() {
         break;
 
       case "game":
-        if (!isTaskDone(task) || currentText === "Claim") {
+        if (currentText === "Claim") {
              executeClaim(task);
-        } else if (["Start Task", "Play Again"].includes(currentText)) {
+        } else {
            navigate("/game");
-           if (gameCompleted) {
-             update(userTasksRef, { [taskId]: false }); // Legacy reset? Prefer centralized reset logic if possible
-             const newTexts = { ...buttonText, [taskId]: "Claim" };
-             setButtonText(newTexts);
-           } else {
-             const newTexts = { ...buttonText, [taskId]: "Play Again" };
-             setButtonText(newTexts);
-           }
         }
         break;
 
@@ -790,11 +782,12 @@ export default function TasksPage() {
                                 {isTaskDone(task)
                                   ? (task.type === 'partnership' || task.type === 'social' ? "Open" : "Done")
                                   : (
-                                      (userTasks[taskId] === false) ||
-                                      (task.type === 'weekly' && task.completed >= task.total)
-                                      ? "Claim" 
-                                      : buttonText[taskId] || "Start Task"
-                                    )
+                                    (userTasks[taskId] === false) ||
+                                    (task.type === 'weekly' && task.completed >= task.total) ||
+                                    (task.type === 'game' && gameCompleted)
+                                    ? "Claim" 
+                                    : buttonText[taskId] || "Start Task"
+                                  )
                                 }
                               </button>
                             </div>
