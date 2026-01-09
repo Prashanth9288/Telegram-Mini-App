@@ -222,7 +222,7 @@ export default function TasksPage() {
   );
 
   const dailyTasks = processedTasks.filter(
-    (task) => task.category === 'daily' || task.category === 'standard' || (!task.category && !['weekly', 'achievements'].includes(task.type))
+    (task) => (task.category === 'daily' || task.category === 'standard' || (!task.category && !['weekly', 'achievements'].includes(task.type))) && task.type !== 'social'
   );
   const weeklyTasks = processedTasks.filter(task => task.category === 'weekly');
   const achievements = processedTasks.filter(task => task.category === 'achievements');
