@@ -370,6 +370,11 @@ export default function TasksPage() {
              
              await update(ref(database, `connections/${user.id}/${taskId}`), claimData);
 
+             // Reset game task completed status after claiming to ensure daily cycle works properly
+             if (taskObj.type === 'game') {
+                await update(ref(database, `connections/${user.id}/tasks/daily`), { game: false });
+             }
+
              // 3. Weekly Progress Logic
              // Check if this was a Daily Task and if we finished the day
              if (taskObj.category === 'daily' || taskObj.type === 'news' || taskObj.type === 'game' || taskObj.type === 'watch') {
